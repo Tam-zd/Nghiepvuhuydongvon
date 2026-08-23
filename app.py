@@ -302,6 +302,11 @@ with col2:
         "📉 Lãi suất không kỳ hạn (%/năm)",
         min_value=0.0, max_value=100.0, value=0.2, step=0.01, format="%.2f"
     )
+    loan_rate = st.number_input(
+        "🏦 Lãi suất vay cầm cố sổ tiết kiệm (%/năm)",
+        min_value=0.0, max_value=100.0, value=8.0, step=0.01, format="%.2f",
+        help="Dùng để so sánh: nếu cần tiền trước hạn, nên rút sổ hay vay cầm cố chính sổ đó?"
+    )
 
 with col3:
     start_date = st.date_input("📌 Ngày gửi tiền", value=date.today())
@@ -441,6 +446,85 @@ if calculate_button:
         st.subheader("🧮 Chi tiết công thức")
         st.latex(r"Lãi = Tiền\ gốc \times \frac{Lãi\ suất}{100} \times \frac{Số\ ngày}{365}")
         st.write(f"Lãi = {principal:,.0f} × {non_term_rate:.2f}% × {days} / 365 = **{format_money(interest)}**")
+
+        # ---------------- TƯ VẤN: RÚT TRƯỚC HẠN VS VAY CẦM CỐ SỔ ----------------
+        st.divider()
+        st.subheader("💡 Tư vấn: Nên rút trước hạn hay vay cầm cố sổ tiết kiệm?")
+
+        days_full_term = get_days(start_date, maturity_date)
+        days_remaining = get_days(withdrawal_date, maturity_date)
+
+        # Phương án A: rút trước hạn, giữ tiền mặt (không sinh lời) đến ngày đáo hạn để so sánh công bằng
+        value_A_at_maturity = principal + interest  # interest ở đây là lãi không kỳ hạn đã tính ở trên
+
+        # Phương án B: vay cầm cố đúng số tiền gốc, giữ sổ đến đáo hạn, hưởng đủ lãi suất có kỳ hạn
+        interest_if_hold_to_maturity = simple_interest(principal, term_rate, days_full_term)
+        loan_cost = simple_interest(principal, loan_rate, days_remaining)
+        value_B_at_maturity = principal + interest_if_hold_to_maturity - loan_cost
+
+        chenh_lech = value_B_at_maturity - value_A_at_maturity
+
+        cA, cB = st.columns(2)
+        with cA:
+            st.markdown(
+                f"""
+                <div class="result-box">
+
+                #### 🅰️ Phương án: Rút trước hạn ngay bây giờ
+
+                - Nhận ngay: **{format_money(value_A_at_maturity - 0)}**
+                  (gốc {format_money(principal)} + lãi không kỳ hạn {format_money(interest)})
+                - Quy đổi giá trị tại ngày đáo hạn ({maturity_date.strftime('%d/%m/%Y')})
+                  nếu giữ nguyên số tiền này (không sinh lời thêm):
+                  **{format_money(value_A_at_maturity)}**
+
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        with cB:
+            st.markdown(
+                f"""
+                <div class="result-box">
+
+                #### 🅱️ Phương án: Vay cầm cố sổ, giữ đến đáo hạn
+
+                - Vay **{format_money(principal)}** với lãi suất **{loan_rate:.2f}%/năm**
+                  trong **{days_remaining} ngày** còn lại (đến {maturity_date.strftime('%d/%m/%Y')})
+                - Chi phí lãi vay: **{format_money(loan_cost)}**
+                - Sổ đáo hạn nhận đủ lãi có kỳ hạn: **{format_money(interest_if_hold_to_maturity)}**
+                - Giá trị còn lại sau khi trả nợ vay tại ngày đáo hạn:
+                  **{format_money(value_B_at_maturity)}**
+
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        if chenh_lech > 0:
+            st.success(
+                f"✅ **Nên VAY CẦM CỐ sổ tiết kiệm** thay vì rút trước hạn. "
+                f"Phương án này có lợi hơn khoảng **{format_money(chenh_lech)}** "
+                f"(tính tại thời điểm đáo hạn), vì lãi suất có kỳ hạn "
+                f"({term_rate:.2f}%/năm) bù đắp được chi phí vay ({loan_rate:.2f}%/năm) "
+                f"trong {days_remaining} ngày còn lại."
+            )
+        elif chenh_lech < 0:
+            st.error(
+                f"⚠️ **Nên RÚT TRƯỚC HẠN**, không nên vay cầm cố. "
+                f"Vay cầm cố sẽ thiệt hơn khoảng **{format_money(-chenh_lech)}** "
+                f"(tính tại thời điểm đáo hạn), vì chi phí lãi vay "
+                f"({loan_rate:.2f}%/năm) cao hơn phần lãi có kỳ hạn được giữ lại."
+            )
+        else:
+            st.info("➖ Hai phương án cho kết quả tương đương nhau.")
+
+        st.caption(
+            "⚠️ Đây là so sánh mang tính tham khảo dựa trên lãi đơn theo ngày thực tế, "
+            "giả định vay đúng bằng số tiền gốc và trả nợ một lần khi sổ đáo hạn. "
+            "Điều kiện vay cầm cố thực tế (hạn mức, phí, thủ tục) có thể khác nhau tùy ngân hàng — "
+            "vui lòng liên hệ ngân hàng để có con số chính xác trước khi quyết định."
+        )
 
         report_df = pd.DataFrame([{
             "Trạng thái": "Rút trước hạn",
