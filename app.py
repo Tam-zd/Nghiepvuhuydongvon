@@ -182,11 +182,26 @@ st.subheader("1️⃣ Thông tin tiền gửi")
 
 col1, col2, col3 = st.columns(3)
 
+QUICK_AMOUNTS = [50, 100, 200, 500, 1000, 2000]  # triệu đồng
+
+if "principal_million" not in st.session_state:
+    st.session_state.principal_million = 500.0
+
 with col1:
     principal_million = st.number_input(
         "💰 Số tiền khách hàng gửi (triệu đồng)",
-        min_value=0.01, value=500.0, step=10.0, format="%.2f"
+        min_value=0.01, step=10.0, format="%.2f",
+        key="principal_million"
     )
+
+    st.caption("Chọn nhanh:")
+    quick_cols = st.columns(len(QUICK_AMOUNTS))
+    for i, amt in enumerate(QUICK_AMOUNTS):
+        label = f"{amt} tr" if amt < 1000 else f"{amt // 1000} tỷ"
+        if quick_cols[i].button(label, use_container_width=True, key=f"quick_{amt}"):
+            st.session_state.principal_million = float(amt)
+            st.rerun()
+
     term_text = st.selectbox("📅 Kỳ hạn gửi tiền", list(TERM_OPTIONS.keys()), index=3)
     term_months = TERM_OPTIONS[term_text]
 
