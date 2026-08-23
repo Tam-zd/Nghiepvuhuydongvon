@@ -268,9 +268,10 @@ QUICK_AMOUNTS = [50_000_000, 100_000_000, 200_000_000, 500_000_000, 1_000_000_00
 st.caption("Chọn nhanh:")
 quick_cols = st.columns(len(QUICK_AMOUNTS))
 for i, amt in enumerate(QUICK_AMOUNTS):
-    if quick_cols[i].button(auto_label(amt), use_container_width=True, key=f"quick_{amt}"):
-        _set_amount(amt)
-        st.rerun()
+    quick_cols[i].button(
+        auto_label(amt), use_container_width=True, key=f"quick_{amt}",
+        on_click=_set_amount, args=(amt,)
+    )
 
 st.caption("⚡ Điều chỉnh nhanh:")
 adj_cols = st.columns(6)
@@ -279,9 +280,10 @@ for col, nhan, delta in zip(
     ["➕1tr", "➕10tr", "➕50tr", "➖1tr", "➖10tr", "➖50tr"],
     [1_000_000, 10_000_000, 50_000_000, -1_000_000, -10_000_000, -50_000_000]
 ):
-    if col.button(nhan, key=f"delta_{delta}", use_container_width=True):
-        _set_amount(st.session_state.so_tien_goc + delta)
-        st.rerun()
+    col.button(
+        nhan, key=f"delta_{delta}", use_container_width=True,
+        on_click=_set_amount, args=(st.session_state.so_tien_goc + delta,)
+    )
 
 st.divider()
 
