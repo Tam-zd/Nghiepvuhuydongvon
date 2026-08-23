@@ -1,1172 +1,468 @@
-import streamlit as st
+"""
+Ứng dụng Streamlit: TÍNH LÃI TIỀN GỬI TIẾT KIỆM (v3 — Ô NHẬP TIỀN THÔNG MINH)
+Tác giả: Claude (chuyên gia IT tài chính giả lập)
+
+ĐIỂM MỚI SO VỚI v2:
+- Ô nhập số tiền được nâng cấp thành "ô nhập thông minh":
+    + Gõ số ngắn (vd 50, 500) -> hiện các mức gợi ý theo bội số 10 (nghìn/triệu/tỷ).
+    + Gõ trực tiếp "50 triệu", "1 tỷ", "1.5 tỷ", "200k"... đều hiểu được.
+    + Có nút tăng nhanh +1/+10/+50 triệu và nút giảm nhanh tương ứng.
+    + Tự động định dạng lại thành số VNĐ có dấu phẩy + nhãn rút gọn (vd "50 triệu").
+- Toàn bộ nghiệp vụ tính lãi (rút trước hạn, tự động tái tục, 3 phương thức nhận lãi,
+  bảng chi tiết, biểu đồ, so sánh 3 phương thức) giữ NGUYÊN như bản trước.
+
+Lưu ý về giới hạn kỹ thuật: Streamlit chỉ rerun script khi một widget "chốt" giá trị
+(nhấn Enter / rời khỏi ô nhập / bấm nút) — không có kiểu autocomplete "gõ tới đâu gợi ý
+tới đó theo từng ký tự" như JavaScript thật sự. Gợi ý sẽ xuất hiện ngay sau khi bạn gõ
+xong và nhấn Enter (hoặc click ra ngoài ô), điều này vẫn tạo cảm giác "gõ là có gợi ý"
+rất nhanh trong thực tế sử dụng.
+"""
+
+import calendar
+import re
 from datetime import date, timedelta
-from dateutil.relativedelta import relativedelta
-import pandas as pd
-import math
+from functools import partial
+
+import streamlit as st
+
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
 
 
-# ============================================================
-# CẤU HÌNH TRANG
-# ============================================================
-
-st.set_page_config(
-    page_title="Tính tiền gửi tiết kiệm",
-    page_icon="🏦",
-    layout="wide",
-    initial_sidebar_state="expanded"
+# ==========================================================
+# Cấu hình trang
+# ==========================================================
+st.set_page_config(page_title="Tính lãi tiền gửi tiết kiệm", page_icon="💰", layout="wide")
+st.title("💰 TÍNH LÃI TIỀN GỬI TIẾT KIỆM")
+st.caption(
+    "Công cụ mô phỏng lãi tiền gửi tiết kiệm có kỳ hạn — tự động gia hạn, "
+    "hỗ trợ 3 phương thức nhận lãi và tính lãi suất không kỳ hạn khi rút trước hạn."
 )
 
-
-# ============================================================
-# CSS GIAO DIỆN
-# ============================================================
-
-st.markdown("""
-<style>
-
-    .main-title {
-        font-size: 34px;
-        font-weight: 800;
-        color: #0F4C81;
-        margin-bottom: 5px;
-    }
-
-    .sub-title {
-        color: #666666;
-        font-size: 16px;
-        margin-bottom: 25px;
-    }
-
-    .result-box {
-        padding: 20px;
-        border-radius: 12px;
-        background-color: #F5F9FF;
-        border: 1px solid #D9E8F7;
-        margin-bottom: 15px;
-    }
-
-    .warning-box {
-        padding: 15px;
-        border-radius: 10px;
-        background-color: #FFF8E1;
-        border: 1px solid #FFE082;
-    }
-
-    .success-box {
-        padding: 15px;
-        border-radius: 10px;
-        background-color: #E8F5E9;
-        border: 1px solid #A5D6A7;
-    }
-
-    div[data-testid="stMetricValue"] {
-        font-size: 25px;
-    }
-
-</style>
-""", unsafe_allow_html=True)
-
-
-# ============================================================
-# HÀM ĐỊNH DẠNG
-# ============================================================
-
-def format_money(value):
-    """Định dạng tiền Việt Nam."""
-    return f"{value:,.0f} VNĐ"
-
-
-def format_million(value):
-    """Định dạng tiền theo triệu đồng."""
-    return f"{value:,.2f} triệu đồng"
-
-
-def format_percent(value):
-    return f"{value:.2f}%"
-
-
-# ============================================================
-# HÀM TÍNH KỲ HẠN
-# ============================================================
-
-TERM_OPTIONS = {
-    "Không kỳ hạn": 0,
-    "1 tháng": 1,
-    "2 tháng": 2,
-    "3 tháng": 3,
-    "6 tháng": 6,
-    "9 tháng": 9,
-    "12 tháng": 12,
-    "18 tháng": 18,
-    "24 tháng": 24,
-    "36 tháng": 36
+KY_HAN_OPTIONS = {
+    "1 tháng": 1, "2 tháng": 2, "3 tháng": 3, "6 tháng": 6,
+    "9 tháng": 9, "12 tháng": 12, "13 tháng": 13,
+    "18 tháng": 18, "24 tháng": 24, "36 tháng": 36,
+    "Tùy chỉnh...": None,
 }
 
+PHUONG_THUC_OPTIONS = [
+    "Nhận lãi cuối kỳ (gộp lãi vào gốc mỗi lần đáo hạn)",
+    "Nhận lãi định kỳ hàng tháng",
+    "Nhận lãi trước",
+]
 
-def get_maturity_date(start_date, term_months):
-    """
-    Tính ngày đáo hạn.
 
-    Ví dụ:
-    Gửi 01/01 kỳ hạn 3 tháng
-    -> đáo hạn 01/04.
-    """
+# ==========================================================
+# Hàm tiện ích chung
+# ==========================================================
+def add_months(d: date, months: int) -> date:
+    """Cộng thêm 'months' tháng vào ngày d, tự xử lý số ngày cuối tháng."""
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
-    if term_months == 0:
+
+def fmt_vnd(so_tien: float) -> str:
+    return f"{so_tien:,.0f} VNĐ"
+
+
+def xay_dung_lich_ky(ngay_gui: date, ky_han_thang: int, ngay_rut: date):
+    ky_hoan_thanh = []
+    start = ngay_gui
+    end = add_months(start, ky_han_thang)
+
+    while ngay_rut >= end:
+        so_ngay = (end - start).days
+        ky_hoan_thanh.append((start, end, so_ngay))
+        start = end
+        end = add_months(start, ky_han_thang)
+
+    if ngay_rut > start:
+        so_ngay_le = (ngay_rut - start).days
+        ky_le = (start, ngay_rut, so_ngay_le)
+    else:
+        ky_le = None
+
+    return ky_hoan_thanh, ky_le
+
+
+# ==========================================================
+# Ô NHẬP TIỀN THÔNG MINH — parser + nhãn rút gọn + gợi ý
+# ==========================================================
+_SUFFIX_MULT = {
+    "": 1, "d": 1, "dong": 1, "đ": 1, "đồng": 1,
+    "k": 1_000, "nghin": 1_000, "nghìn": 1_000,
+    "tr": 1_000_000, "trieu": 1_000_000, "triệu": 1_000_000, "m": 1_000_000,
+    "ty": 1_000_000_000, "tỷ": 1_000_000_000, "b": 1_000_000_000,
+}
+
+_PARSE_RE = re.compile(r"^([\d]*\.?[\d]+)\s*([^\d\s]*)$", re.UNICODE)
+_BARE_NUMBER_RE = re.compile(r"^\d*\.?\d+$")
+
+
+def parse_smart_amount(text: str):
+    """Hiểu các cách gõ: '500000000', '50 triệu', '1.5 tỷ', '200k'... -> float VNĐ hoặc None."""
+    if not text:
         return None
-
-    return start_date + relativedelta(months=term_months)
-
-
-def get_days(start_date, end_date):
-    """
-    Số ngày tính lãi.
-
-    Theo yêu cầu:
-    bắt đầu từ ngày gửi
-    đến trước 1 ngày ngày rút/đáo hạn.
-
-    Ví dụ:
-    01/01 -> 01/04
-    = 90 ngày, không tính ngày 01/04.
-    """
-
-    return (end_date - start_date).days
+    t = text.strip().lower()
+    t = t.replace(",", "").replace("vnđ", "").replace("vnd", "").strip()
+    m = _PARSE_RE.match(t)
+    if not m:
+        return None
+    num_str, suffix = m.groups()
+    suffix = suffix.strip()
+    if suffix not in _SUFFIX_MULT:
+        return None
+    try:
+        number = float(num_str)
+    except ValueError:
+        return None
+    return number * _SUFFIX_MULT[suffix]
 
 
-# ============================================================
-# HÀM TÍNH LÃI
-# ============================================================
-
-def calculate_interest(principal, annual_rate, days):
-    """
-    Lãi đơn theo số ngày.
-
-    Lãi = Gốc × Lãi suất năm × Số ngày / 365
-    """
-
-    if days <= 0:
-        return 0
-
-    return principal * (annual_rate / 100) * days / 365
+def is_bare_small_number(text: str):
+    """Trả về số N nếu người dùng gõ một số trần (không hậu tố) và số đó < 1 triệu (còn mơ hồ)."""
+    if not text:
+        return None
+    t = text.strip().replace(",", "")
+    if _BARE_NUMBER_RE.match(t):
+        try:
+            n = float(t)
+        except ValueError:
+            return None
+        if 0 < n < 1_000_000:
+            return n
+    return None
 
 
-# ============================================================
-# TÍNH LÃI THEO TỪNG THÁNG
-# ============================================================
-
-def calculate_monthly_interest(
-    principal,
-    annual_rate,
-    start_date,
-    end_date
-):
-    """
-    Chia thời gian thành từng tháng để tính lãi hàng tháng.
-
-    Tiền lãi mỗi tháng được tính trên số ngày thực tế của tháng đó.
-    """
-
-    rows = []
-
-    current_date = start_date
-    total_interest = 0
-
-    while current_date < end_date:
-
-        next_month = current_date + relativedelta(months=1)
-
-        # Không vượt quá ngày kết thúc
-        period_end = min(next_month, end_date)
-
-        days = get_days(current_date, period_end)
-
-        interest = calculate_interest(
-            principal,
-            annual_rate,
-            days
-        )
-
-        total_interest += interest
-
-        rows.append({
-            "Kỳ": len(rows) + 1,
-            "Từ ngày": current_date.strftime("%d/%m/%Y"),
-            "Đến trước ngày": period_end.strftime("%d/%m/%Y"),
-            "Số ngày": days,
-            "Tiền lãi": interest
-        })
-
-        current_date = period_end
-
-    return total_interest, rows
+def auto_label(v: float) -> str:
+    """Đổi số tiền thành nhãn rút gọn kiểu Việt Nam: 50 triệu / 1.5 tỷ / 200 nghìn..."""
+    v = float(v)
+    if v >= 1_000_000_000:
+        x = v / 1_000_000_000
+        return f"{x:g} tỷ"
+    if v >= 1_000_000:
+        x = v / 1_000_000
+        return f"{x:g} triệu"
+    if v >= 1_000:
+        x = v / 1_000
+        return f"{x:g} nghìn"
+    return f"{v:g} đồng"
 
 
-# ============================================================
-# TÍNH LẠI SUẤT TRƯỚC HẠN
-# ============================================================
+DEFAULT_AMOUNT = 100_000_000.0
 
-def calculate_early_withdrawal(
-    principal,
-    non_term_rate,
-    start_date,
-    withdrawal_date
-):
+if "so_tien_goc" not in st.session_state:
+    st.session_state.so_tien_goc = DEFAULT_AMOUNT
+if "so_tien_text" not in st.session_state:
+    st.session_state.so_tien_text = f"{DEFAULT_AMOUNT:,.0f}"
 
-    days = get_days(
-        start_date,
-        withdrawal_date
+
+def _set_amount(new_val: float):
+    new_val = max(float(new_val), 0.0)
+    st.session_state.so_tien_goc = new_val
+    st.session_state.so_tien_text = f"{new_val:,.0f}"
+
+
+def _on_change_text():
+    val = parse_smart_amount(st.session_state.so_tien_text)
+    if val is not None:
+        _set_amount(val)
+    else:
+        # gõ không hợp lệ -> quay về giá trị hợp lệ gần nhất, tránh vỡ tính toán
+        st.session_state.so_tien_text = f"{st.session_state.so_tien_goc:,.0f}"
+
+
+def _reset_amount():
+    _set_amount(DEFAULT_AMOUNT)
+
+
+# ==========================================================
+# GIAO DIỆN NHẬP TIỀN THÔNG MINH (nằm ngoài form để nút bấm phản hồi tức thì)
+# ==========================================================
+st.subheader("📋 Thông tin gửi tiết kiệm")
+
+st.markdown("**💰 Số tiền gửi**")
+c_input, c_reset = st.columns([5, 1])
+with c_input:
+    st.text_input(
+        "Nhập số tiền (vd: 50, 500, 50 triệu, 1.5 tỷ, 200k...)",
+        key="so_tien_text",
+        on_change=_on_change_text,
+        label_visibility="collapsed",
     )
+with c_reset:
+    st.button("↺ Đặt lại", on_click=_reset_amount, use_container_width=True)
 
-    interest = calculate_interest(
-        principal,
-        non_term_rate,
-        days
-    )
+st.caption(f"➡️ Số tiền đang chọn: **{fmt_vnd(st.session_state.so_tien_goc)}** "
+           f"(≈ {auto_label(st.session_state.so_tien_goc)})")
 
-    total = principal + interest
+# ---- Gợi ý nhanh khi gõ số ngắn/mơ hồ ----
+n_goi_y = is_bare_small_number(st.session_state.so_tien_text)
+if n_goi_y is not None:
+    goi_y_values = [n_goi_y * 1_000, n_goi_y * 10_000, n_goi_y * 100_000, n_goi_y * 1_000_000]
+    st.caption("💡 Gợi ý nhanh — bấm để chọn:")
+    cols = st.columns(len(goi_y_values))
+    for col, v in zip(cols, goi_y_values):
+        with col:
+            st.button(auto_label(v), key=f"goi_y_{v}", on_click=partial(_set_amount, v), use_container_width=True)
 
-    return {
-        "days": days,
-        "interest": interest,
-        "total": total
-    }
-
-
-# ============================================================
-# TÍNH TÁI TỤC
-# ============================================================
-
-def calculate_renewal_periods(
-    principal,
-    annual_rate,
-    start_date,
-    withdrawal_date,
-    term_months
-):
-    """
-    Nếu khách hàng không rút khi đến hạn:
-    ngân hàng tự động gia hạn đúng kỳ hạn.
-
-    Ví dụ:
-    gửi 01/01/2026 kỳ hạn 3 tháng
-    rút 10/10/2026
-
-    Các kỳ:
-    01/01 -> 01/04
-    01/04 -> 01/07
-    01/07 -> 01/10
-    01/10 -> 10/10
-    """
-
-    periods = []
-
-    current_start = start_date
-
-    while current_start < withdrawal_date:
-
-        maturity = current_start + relativedelta(
-            months=term_months
-        )
-
-        period_end = min(
-            maturity,
-            withdrawal_date
-        )
-
-        days = get_days(
-            current_start,
-            period_end
-        )
-
-        interest = calculate_interest(
-            principal,
-            annual_rate,
-            days
-        )
-
-        periods.append({
-            "Kỳ": len(periods) + 1,
-            "Ngày bắt đầu": current_start,
-            "Ngày kết thúc": period_end,
-            "Số ngày": days,
-            "Tiền gốc": principal,
-            "Lãi suất": annual_rate,
-            "Tiền lãi": interest,
-            "Đáo hạn": period_end == maturity
-        })
-
-        current_start = period_end
-
-    return periods
+# ---- Nút tăng / giảm nhanh ----
+def _adjust_amount(delta: float):
+    """Đọc giá trị MỚI NHẤT từ session_state ngay tại thời điểm bấm nút, tránh lệch giá trị."""
+    _set_amount(st.session_state.so_tien_goc + delta)
 
 
-# ============================================================
-# HEADER
-# ============================================================
-
-st.markdown(
-    '<div class="main-title">🏦 HỆ THỐNG TÍNH TIỀN GỬI TIẾT KIỆM</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<div class="sub-title">'
-    'Mô phỏng tiền gốc, tiền lãi, đáo hạn, rút trước hạn và tự động tái tục'
-    '</div>',
-    unsafe_allow_html=True
-)
+st.caption("⚡ Điều chỉnh nhanh:")
+b1, b2, b3, b4, b5, b6 = st.columns(6)
+buoc_dieu_chinh = [
+    (b1, "➕ 1 triệu", 1_000_000),
+    (b2, "➕ 10 triệu", 10_000_000),
+    (b3, "➕ 50 triệu", 50_000_000),
+    (b4, "➖ 1 triệu", -1_000_000),
+    (b5, "➖ 10 triệu", -10_000_000),
+    (b6, "➖ 50 triệu", -50_000_000),
+]
+for col, nhan, delta in buoc_dieu_chinh:
+    with col:
+        st.button(nhan, key=f"delta_{delta}", on_click=partial(_adjust_amount, delta), use_container_width=True)
 
 
-# ============================================================
-# SIDEBAR
-# ============================================================
+# ==========================================================
+# Form các thông tin còn lại — giữ nguyên như bản trước
+# (so_tien_goc lấy từ ô nhập thông minh phía trên qua session_state)
+# ==========================================================
+with st.form("form_tinh_lai"):
+    so_tien_goc = st.session_state.so_tien_goc
+    st.markdown(f"*(Số tiền gửi đang dùng để tính: **{fmt_vnd(so_tien_goc)}**)*")
 
-with st.sidebar:
-
-    st.header("⚙️ Cấu hình hệ thống")
-
-    basis_days = st.selectbox(
-        "Cơ sở tính lãi",
-        [365],
-        index=0,
-        help="Phiên bản này sử dụng 365 ngày/năm."
-    )
-
-    st.divider()
-
-    st.info(
-        """
-        **Quy tắc tính:**
-
-        • Lãi theo ngày thực tế.
-
-        • Không tính ngày đáo hạn/rút tiền.
-
-        • Rút trước hạn → dùng lãi suất không kỳ hạn.
-
-        • Đến hạn không rút → tự động tái tục.
-
-        • Kỳ hạn tái tục = kỳ hạn ban đầu.
-        """
-    )
-
-
-# ============================================================
-# NHẬP THÔNG TIN
-# ============================================================
-
-st.subheader("1️⃣ Thông tin tiền gửi")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-
-    principal_million = st.number_input(
-        "💰 Số tiền khách hàng gửi (triệu đồng)",
-        min_value=0.01,
-        value=500.0,
-        step=10.0,
-        format="%.2f"
-    )
-
-    term_text = st.selectbox(
-        "📅 Kỳ hạn gửi tiền",
-        list(TERM_OPTIONS.keys()),
-        index=3
-    )
-
-    term_months = TERM_OPTIONS[term_text]
-
-
-with col2:
-
-    term_rate = st.number_input(
-        "📈 Lãi suất có kỳ hạn (%/năm)",
-        min_value=0.0,
-        max_value=100.0,
-        value=5.0,
-        step=0.01,
-        format="%.2f"
-    )
-
-    non_term_rate = st.number_input(
-        "📉 Lãi suất không kỳ hạn (%/năm)",
-        min_value=0.0,
-        max_value=100.0,
-        value=0.2,
-        step=0.01,
-        format="%.2f"
-    )
-
-
-with col3:
-
-    start_date = st.date_input(
-        "📌 Ngày gửi tiền",
-        value=date.today()
-    )
-
-    withdrawal_date = st.date_input(
-        "🏧 Ngày rút tiền",
-        value=date.today() + relativedelta(months=3)
-    )
-
-
-# ============================================================
-# HIỂN THỊ NGÀY ĐÁO HẠN
-# ============================================================
-
-if term_months > 0:
-
-    maturity_date = get_maturity_date(
-        start_date,
-        term_months
-    )
-
-    c1, c2, c3 = st.columns(3)
-
+    c1, c2 = st.columns(2)
     with c1:
-        st.metric(
-            "Ngày gửi",
-            start_date.strftime("%d/%m/%Y")
+        lai_suat_ky_han = st.number_input(
+            "Lãi suất CÓ kỳ hạn (%/năm)", min_value=0.0, value=5.5, step=0.1
+        )
+        lai_suat_khong_ky_han = st.number_input(
+            "Lãi suất KHÔNG kỳ hạn (%/năm)", min_value=0.0, value=0.2, step=0.1
         )
 
     with c2:
-        st.metric(
-            "Ngày đáo hạn",
-            maturity_date.strftime("%d/%m/%Y")
-        )
+        ngay_gui = st.date_input("Ngày gửi tiền", value=date.today())
+        ngay_rut = st.date_input("Ngày rút tiền (dự kiến / thực tế)", value=date.today() + timedelta(days=180))
 
-    with c3:
-
-        if withdrawal_date < maturity_date:
-
-            st.error("⚠️ KHÁCH HÀNG RÚT TRƯỚC HẠN")
-
-        elif withdrawal_date == maturity_date:
-
-            st.success("✅ KHÁCH HÀNG RÚT ĐÚNG NGÀY ĐÁO HẠN")
-
+        ky_han_label = st.selectbox("Kỳ hạn gửi tiền", list(KY_HAN_OPTIONS.keys()), index=2)
+        if KY_HAN_OPTIONS[ky_han_label] is None:
+            ky_han_thang = st.number_input("Nhập số tháng kỳ hạn tùy chỉnh", min_value=1, value=1, step=1)
         else:
+            ky_han_thang = KY_HAN_OPTIONS[ky_han_label]
 
-            st.warning(
-                "🔄 Khách hàng rút sau ngày đáo hạn → có tái tục"
-            )
+    phuong_thuc = st.radio("Phương thức nhận lãi", PHUONG_THUC_OPTIONS, index=0)
 
+    submitted = st.form_submit_button("🧮 TÍNH TOÁN", use_container_width=True)
 
-# ============================================================
-# PHƯƠNG THỨC NHẬN LÃI
-# ============================================================
 
-st.subheader("2️⃣ Phương thức nhận tiền lãi")
-
-interest_method = st.radio(
-    "Chọn cách nhận tiền lãi:",
-    [
-        "💵 Nhận lãi trước",
-        "📆 Nhận lãi hàng tháng",
-        "🏁 Nhận lãi cuối kỳ"
-    ],
-    horizontal=True
-)
-
-
-# ============================================================
-# NÚT TÍNH TOÁN
-# ============================================================
-
-st.divider()
-
-calculate_button = st.button(
-    "🧮 TÍNH TOÁN",
-    type="primary",
-    use_container_width=True
-)
-
-
-# ============================================================
-# XỬ LÝ TÍNH TOÁN
-# ============================================================
-
-if calculate_button:
-
-    # --------------------------------------------------------
-    # KIỂM TRA DỮ LIỆU
-    # --------------------------------------------------------
-
-    if principal_million <= 0:
-
-        st.error("Số tiền gửi phải lớn hơn 0.")
-
-        st.stop()
-
-    if withdrawal_date <= start_date:
-
-        st.error(
-            "Ngày rút tiền phải lớn hơn ngày gửi tiền."
-        )
-
-        st.stop()
-
-    if term_months == 0:
-
-        st.warning(
-            "Bạn đang chọn tiền gửi không kỳ hạn. "
-            "Hệ thống sẽ sử dụng lãi suất không kỳ hạn."
-        )
-
-    # Chuyển triệu đồng -> VNĐ
-    principal = principal_million * 1_000_000
-
-    # --------------------------------------------------------
-    # TRƯỜNG HỢP KHÔNG KỲ HẠN
-    # --------------------------------------------------------
-
-    if term_months == 0:
-
-        actual_rate = non_term_rate
-
-        days = get_days(
-            start_date,
-            withdrawal_date
-        )
-
-        interest = calculate_interest(
-            principal,
-            actual_rate,
-            days
-        )
-
-        total_receive = principal + interest
-
-        st.subheader("📊 KẾT QUẢ")
-
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            st.metric(
-                "Tiền gốc",
-                format_million(principal / 1_000_000)
-            )
-
-        with col2:
-            st.metric(
-                "Số ngày gửi",
-                f"{days} ngày"
-            )
-
-        with col3:
-            st.metric(
-                "Tiền lãi",
-                format_million(interest / 1_000_000)
-            )
-
-        with col4:
-            st.metric(
-                "Tổng nhận",
-                format_million(total_receive / 1_000_000)
-            )
-
-        st.success(
-            f"Khách hàng nhận được tổng cộng "
-            f"**{format_money(total_receive)}**."
-        )
-
-        st.stop()
-
-    # --------------------------------------------------------
-    # XÁC ĐỊNH TRẠNG THÁI
-    # --------------------------------------------------------
-
-    maturity_date = get_maturity_date(
-        start_date,
-        term_months
-    )
-
-    early_withdrawal = withdrawal_date < maturity_date
-    exact_maturity = withdrawal_date == maturity_date
-    after_maturity = withdrawal_date > maturity_date
-
-    # --------------------------------------------------------
-    # RÚT TRƯỚC HẠN
-    # --------------------------------------------------------
-
-    if early_withdrawal:
-
-        result = calculate_early_withdrawal(
-            principal,
-            non_term_rate,
-            start_date,
-            withdrawal_date
-        )
-
-        days = result["days"]
-        interest = result["interest"]
-        total_receive = result["total"]
-
-        st.error(
-            "⚠️ KHÁCH HÀNG RÚT TRƯỚC HẠN"
-        )
-
-        st.warning(
-            f"Theo quy tắc hệ thống, toàn bộ thời gian gửi "
-            f"được tính theo lãi suất không kỳ hạn "
-            f"**{non_term_rate:.2f}%/năm**."
-        )
-
-        # -----------------------------------------------
-        # KẾT QUẢ
-        # -----------------------------------------------
-
-        st.subheader("📊 KẾT QUẢ RÚT TRƯỚC HẠN")
-
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            st.metric(
-                "Tiền gốc",
-                format_million(principal / 1_000_000)
-            )
-
-        with col2:
-            st.metric(
-                "Số ngày gửi",
-                f"{days} ngày"
-            )
-
-        with col3:
-            st.metric(
-                "Tiền lãi",
-                format_million(interest / 1_000_000)
-            )
-
-        with col4:
-            st.metric(
-                "TỔNG NHẬN",
-                format_million(total_receive / 1_000_000)
-            )
-
-        st.markdown(
-            f"""
-            <div class="result-box">
-
-            ### 💰 Tổng số tiền khách hàng nhận được
-
-            **{format_money(total_receive)}**
-
-            Trong đó:
-
-            - Tiền gốc: **{format_money(principal)}**
-            - Tiền lãi: **{format_money(interest)}**
-            - Lãi suất áp dụng: **{non_term_rate:.2f}%/năm**
-            - Số ngày thực gửi: **{days} ngày**
-
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-        # -----------------------------------------------
-        # CÔNG THỨC
-        # -----------------------------------------------
-
-        st.subheader("🧮 Chi tiết công thức")
-
-        st.latex(
-            r"""
-            Lãi =
-            Tiền\ gốc
-            \times
-            \frac{Lãi\ suất}{100}
-            \times
-            \frac{Số\ ngày}{365}
-            """
-        )
-
-        st.write(
-            f"""
-            **Lãi = {principal:,.0f} × "
-            f"{non_term_rate:.2f}% × {days} / 365"
-            """
-        )
-
-    # --------------------------------------------------------
-    # RÚT ĐÚNG HẠN
-    # --------------------------------------------------------
-
-    elif exact_maturity:
-
-        days = get_days(
-            start_date,
-            maturity_date
-        )
-
-        # -----------------------------------------------
-        # LÃI TRƯỚC
-        # -----------------------------------------------
-
-        if interest_method == "💵 Nhận lãi trước":
-
-            interest = calculate_interest(
-                principal,
-                term_rate,
-                days
-            )
-
-            # Lãi đã được nhận từ đầu.
-            # Khi đáo hạn nhận lại gốc.
-            amount_at_maturity = principal
-
-            total_cash_received = principal + interest
-
-            st.success(
-                "🏁 Khách hàng gửi đúng kỳ hạn."
-            )
-
-            st.subheader("📊 KẾT QUẢ")
-
-            c1, c2, c3, c4 = st.columns(4)
-
-            with c1:
-                st.metric(
-                    "Tiền gốc",
-                    format_million(principal / 1_000_000)
-                )
-
-            with c2:
-                st.metric(
-                    "Tiền lãi",
-                    format_million(interest / 1_000_000)
-                )
-
-            with c3:
-                st.metric(
-                    "Nhận lúc gửi",
-                    format_million(interest / 1_000_000)
-                )
-
-            with c4:
-                st.metric(
-                    "Tổng tiền nhận",
-                    format_million(
-                        total_cash_received / 1_000_000
-                    )
-                )
-
-            st.info(
-                f"""
-                **Phương thức nhận lãi trước**
-
-                Khách hàng nhận trước tiền lãi:
-
-                **{format_money(interest)}**
-
-                Khi đáo hạn khách hàng nhận lại tiền gốc:
-
-                **{format_money(principal)}**
-
-                Tổng dòng tiền khách hàng nhận:
-
-                **{format_money(total_cash_received)}**
-                """
-            )
-
-        # -----------------------------------------------
-        # LÃI HÀNG THÁNG
-        # -----------------------------------------------
-
-        elif interest_method == "📆 Nhận lãi hàng tháng":
-
-            total_interest, monthly_rows = calculate_monthly_interest(
-                principal,
-                term_rate,
-                start_date,
-                maturity_date
-            )
-
-            total_cash_received = (
-                principal + total_interest
-            )
-
-            st.success(
-                "🏁 Khách hàng gửi đúng kỳ hạn."
-            )
-
-            st.subheader(
-                "📊 KẾT QUẢ NHẬN LÃI HÀNG THÁNG"
-            )
-
-            c1, c2, c3, c4 = st.columns(4)
-
-            with c1:
-                st.metric(
-                    "Tiền gốc",
-                    format_million(principal / 1_000_000)
-                )
-
-            with c2:
-                st.metric(
-                    "Tổng tiền lãi",
-                    format_million(
-                        total_interest / 1_000_000
-                    )
-                )
-
-            with c3:
-                st.metric(
-                    "Số kỳ nhận lãi",
-                    f"{len(monthly_rows)} kỳ"
-                )
-
-            with c4:
-                st.metric(
-                    "Tổng dòng tiền nhận",
-                    format_million(
-                        total_cash_received / 1_000_000
-                    )
-                )
-
-            st.dataframe(
-                pd.DataFrame(monthly_rows).assign(
-                    **{
-                        "Tiền lãi": lambda df:
-                        df["Tiền lãi"].map(
-                            lambda x: format_money(x)
-                        )
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True
-            )
-
-        # -----------------------------------------------
-        # LÃI CUỐI KỲ
-        # -----------------------------------------------
-
-        else:
-
-            interest = calculate_interest(
-                principal,
-                term_rate,
-                days
-            )
-
-            total_cash_received = (
-                principal + interest
-            )
-
-            st.success(
-                "🏁 Khách hàng gửi đúng kỳ hạn."
-            )
-
-            st.subheader(
-                "📊 KẾT QUẢ NHẬN LÃI CUỐI KỲ"
-            )
-
-            c1, c2, c3, c4 = st.columns(4)
-
-            with c1:
-                st.metric(
-                    "Tiền gốc",
-                    format_million(principal / 1_000_000)
-                )
-
-            with c2:
-                st.metric(
-                    "Số ngày",
-                    f"{days} ngày"
-                )
-
-            with c3:
-                st.metric(
-                    "Tiền lãi",
-                    format_million(
-                        interest / 1_000_000
-                    )
-                )
-
-            with c4:
-                st.metric(
-                    "TỔNG NHẬN",
-                    format_million(
-                        total_cash_received / 1_000_000
-                    )
-                )
-
-            st.markdown(
-                f"""
-                <div class="success-box">
-
-                ### 💰 Tổng tiền khách hàng nhận
-
-                **{format_money(total_cash_received)}**
-
-                - Gốc: **{format_money(principal)}**
-                - Lãi: **{format_money(interest)}**
-                - Lãi suất: **{term_rate:.2f}%/năm**
-                - Số ngày: **{days} ngày**
-
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-    # --------------------------------------------------------
-    # RÚT SAU NGÀY ĐÁO HẠN → TÁI TỤC
-    # --------------------------------------------------------
-
+# ==========================================================
+# Xử lý tính toán — giữ nguyên toàn bộ logic của bản trước
+# ==========================================================
+if submitted:
+    if ngay_rut <= ngay_gui:
+        st.error("⚠️ Ngày rút tiền phải lớn hơn ngày gửi tiền.")
     else:
+        ky_hoan_thanh, ky_le = xay_dung_lich_ky(ngay_gui, ky_han_thang, ngay_rut)
 
-        st.warning(
-            "🔄 Khách hàng không rút tại ngày đáo hạn. "
-            "Khoản tiền gửi được tự động gia hạn."
-        )
+        i_ky_han = lai_suat_ky_han / 100
+        i_khong_ky_han = lai_suat_khong_ky_han / 100
+        so_ky_da_gia_han = max(len(ky_hoan_thanh) - 1, 0)
 
-        periods = calculate_renewal_periods(
-            principal,
-            term_rate,
-            start_date,
-            withdrawal_date,
-            term_months
-        )
+        rows = []  # để hiển thị bảng chi tiết
 
-        # Tổng lãi
-        total_interest = sum(
-            x["Tiền lãi"]
-            for x in periods
-        )
-
-        total_cash_received = (
-            principal + total_interest
-        )
-
-        st.subheader(
-            "🔄 LỊCH SỬ TÁI TỤC"
-        )
-
-        period_display = []
-
-        for p in periods:
-
-            period_display.append({
-                "Kỳ": p["Kỳ"],
-                "Ngày bắt đầu":
-                    p["Ngày bắt đầu"].strftime("%d/%m/%Y"),
-                "Ngày kết thúc":
-                    p["Ngày kết thúc"].strftime("%d/%m/%Y"),
-                "Số ngày": p["Số ngày"],
-                "Lãi suất":
-                    f"{p['Lãi suất']:.2f}%",
-                "Tiền lãi":
-                    format_money(p["Tiền lãi"]),
-                "Trạng thái":
-                    "Đáo hạn" if p["Đáo hạn"]
-                    else "Rút tiền"
+        # ---------- Trường hợp rút trước cả kỳ hạn đầu tiên ----------
+        if not ky_hoan_thanh and ky_le is not None:
+            start, end, so_ngay = ky_le
+            lai = so_tien_goc * i_khong_ky_han / 365 * so_ngay
+            tong_nhan = so_tien_goc + lai
+            rows.append({
+                "Kỳ": "Lẻ (rút trước hạn kỳ 1)",
+                "Từ ngày": start.strftime("%d/%m/%Y"),
+                "Đến ngày": end.strftime("%d/%m/%Y"),
+                "Số ngày": so_ngay,
+                "Lãi suất áp dụng": f"{lai_suat_khong_ky_han:.2f}%/năm (không kỳ hạn)",
+                "Tiền lãi kỳ": fmt_vnd(lai),
             })
+            trang_thai = "🔴 Rút trước hạn — toàn bộ hưởng lãi suất KHÔNG kỳ hạn"
+            tong_lai = lai
 
-        st.dataframe(
-            pd.DataFrame(period_display),
-            use_container_width=True,
-            hide_index=True
+        else:
+            # ---------- Các kỳ đã hoàn thành ----------
+            if phuong_thuc == PHUONG_THUC_OPTIONS[0]:
+                # Nhận lãi cuối kỳ -> gộp lãi vào gốc (lãi kép qua các kỳ)
+                p = so_tien_goc
+                for (start, end, so_ngay) in ky_hoan_thanh:
+                    lai_ky = p * i_ky_han / 365 * so_ngay
+                    rows.append({
+                        "Kỳ": "Hoàn thành (đáo hạn)",
+                        "Từ ngày": start.strftime("%d/%m/%Y"),
+                        "Đến ngày": end.strftime("%d/%m/%Y"),
+                        "Số ngày": so_ngay,
+                        "Lãi suất áp dụng": f"{lai_suat_ky_han:.2f}%/năm (có kỳ hạn)",
+                        "Tiền lãi kỳ": fmt_vnd(lai_ky),
+                    })
+                    p += lai_ky  # nhập lãi vào gốc
+
+                if ky_le is not None:
+                    start, end, so_ngay = ky_le
+                    lai_le = p * i_khong_ky_han / 365 * so_ngay
+                    rows.append({
+                        "Kỳ": "Lẻ (rút trước hạn kỳ hiện tại)",
+                        "Từ ngày": start.strftime("%d/%m/%Y"),
+                        "Đến ngày": end.strftime("%d/%m/%Y"),
+                        "Số ngày": so_ngay,
+                        "Lãi suất áp dụng": f"{lai_suat_khong_ky_han:.2f}%/năm (không kỳ hạn)",
+                        "Tiền lãi kỳ": fmt_vnd(lai_le),
+                    })
+                    p += lai_le
+                    trang_thai = "🟡 Rút trước hạn của kỳ hiện tại (các kỳ trước đã tính đủ lãi có kỳ hạn)"
+                else:
+                    trang_thai = "🟢 Rút đúng vào ngày đáo hạn — toàn bộ hưởng lãi suất CÓ kỳ hạn"
+
+                tong_nhan = p
+                tong_lai = p - so_tien_goc
+
+            else:
+                # Nhận lãi định kỳ hàng tháng HOẶC nhận lãi trước -> gốc giữ nguyên, không lãi kép
+                nhan_truoc = (phuong_thuc == PHUONG_THUC_OPTIONS[2])
+                tong_lai = 0.0
+                for (start, end, so_ngay) in ky_hoan_thanh:
+                    lai_ky = so_tien_goc * i_ky_han / 365 * so_ngay
+                    nhan_dinh = "Tạm ứng đầu kỳ" if nhan_truoc else "Trả hàng tháng trong kỳ"
+                    rows.append({
+                        "Kỳ": "Hoàn thành (đáo hạn)",
+                        "Từ ngày": start.strftime("%d/%m/%Y"),
+                        "Đến ngày": end.strftime("%d/%m/%Y"),
+                        "Số ngày": so_ngay,
+                        "Lãi suất áp dụng": f"{lai_suat_ky_han:.2f}%/năm (có kỳ hạn) — {nhan_dinh}",
+                        "Tiền lãi kỳ": fmt_vnd(lai_ky),
+                    })
+                    tong_lai += lai_ky
+
+                if ky_le is not None:
+                    start, end, so_ngay = ky_le
+                    lai_le = so_tien_goc * i_khong_ky_han / 365 * so_ngay
+                    ghi_chu = (
+                        "Thu hồi phần lãi tạm ứng dư, chỉ còn hưởng lãi không kỳ hạn"
+                        if nhan_truoc else
+                        "Bù thêm lãi không kỳ hạn cho số ngày lẻ"
+                    )
+                    rows.append({
+                        "Kỳ": "Lẻ (rút trước hạn kỳ hiện tại)",
+                        "Từ ngày": start.strftime("%d/%m/%Y"),
+                        "Đến ngày": end.strftime("%d/%m/%Y"),
+                        "Số ngày": so_ngay,
+                        "Lãi suất áp dụng": f"{lai_suat_khong_ky_han:.2f}%/năm (không kỳ hạn) — {ghi_chu}",
+                        "Tiền lãi kỳ": fmt_vnd(lai_le),
+                    })
+                    tong_lai += lai_le
+                    trang_thai = "🟡 Rút trước hạn của kỳ hiện tại (các kỳ trước đã tính đủ lãi có kỳ hạn)"
+                else:
+                    trang_thai = "🟢 Rút đúng vào ngày đáo hạn — toàn bộ hưởng lãi suất CÓ kỳ hạn"
+
+                tong_nhan = so_tien_goc + tong_lai
+
+        # ---------- Hiển thị kết quả ----------
+        st.success("Đã tính toán xong!")
+        st.markdown(f"**Trạng thái:** {trang_thai}")
+        if so_ky_da_gia_han > 0:
+            st.info(f"ℹ️ Sổ tiết kiệm đã được ngân hàng **tự động gia hạn {so_ky_da_gia_han} lần** "
+                    f"(mỗi lần đúng bằng kỳ hạn {ky_han_thang} tháng đã đăng ký) vì khách hàng không tất toán đúng hạn ban đầu.")
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Số tiền gốc ban đầu", fmt_vnd(so_tien_goc))
+        col2.metric("Tổng tiền lãi", fmt_vnd(tong_lai))
+        col3.metric("Tổng số tiền nhận được", fmt_vnd(tong_nhan))
+
+        st.write(f"**Tổng số ngày gửi thực tế:** {(ngay_rut - ngay_gui).days} ngày "
+                 f"(từ {ngay_gui.strftime('%d/%m/%Y')} đến {ngay_rut.strftime('%d/%m/%Y')})")
+
+        st.write("---")
+        st.subheader("📊 Chi tiết từng kỳ tính lãi")
+        if HAS_PANDAS:
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Tải bảng chi tiết (CSV)",
+                df.to_csv(index=False).encode("utf-8-sig"),
+                file_name="chi_tiet_lai_tiet_kiem.csv",
+                mime="text/csv",
+            )
+        else:
+            for r in rows:
+                st.write(r)
+
+        # ---------- Biểu đồ minh họa tăng trưởng số dư ----------
+        if HAS_PANDAS and rows:
+            st.write("---")
+            st.subheader("📈 Minh họa tăng trưởng số tiền qua từng kỳ")
+            so_du = so_tien_goc
+            nhan = ["Ban đầu"]
+            gia_tri = [so_du]
+            for r in rows:
+                lai_ky_val = float(r["Tiền lãi kỳ"].replace(" VNĐ", "").replace(",", ""))
+                if phuong_thuc == PHUONG_THUC_OPTIONS[0]:
+                    so_du += lai_ky_val
+                else:
+                    so_du = so_tien_goc + sum(
+                        float(x["Tiền lãi kỳ"].replace(" VNĐ", "").replace(",", ""))
+                        for x in rows[: rows.index(r) + 1]
+                    )
+                nhan.append(r["Đến ngày"])
+                gia_tri.append(so_du)
+            chart_df = pd.DataFrame({"Số dư ước tính (VNĐ)": gia_tri}, index=nhan)
+            st.line_chart(chart_df)
+
+        # ---------- So sánh nhanh 3 phương thức (nếu rút đúng/sau hạn) ----------
+        st.write("---")
+        st.subheader("⚖️ So sánh nhanh 3 phương thức nhận lãi (cùng điều kiện gửi)")
+        st.caption(
+            "So sánh tổng số tiền nhận được cuối cùng nếu áp dụng cùng ngày gửi / ngày rút / kỳ hạn, "
+            "chỉ khác phương thức nhận lãi. Chênh lệch (nếu có) chủ yếu đến từ hiệu ứng lãi kép "
+            "khi sổ được tự động gia hạn nhiều lần ở phương thức “nhận lãi cuối kỳ”."
         )
 
-        # -----------------------------------------------
-        # KẾT QUẢ
-        # -----------------------------------------------
-
-        st.subheader(
-            "📊 TỔNG KẾT KHOẢN TIỀN GỬI"
-        )
-
-        c1, c2, c3, c4 = st.columns(4)
-
-        with c1:
-            st.metric(
-                "Tiền gốc",
-                format_million(
-                    principal / 1_000_000
-                )
-            )
-
-        with c2:
-            st.metric(
-                "Số lần tái tục",
-                f"{max(len(periods) - 1, 0)} lần"
-            )
-
-        with c3:
-            st.metric(
-                "Tổng tiền lãi",
-                format_million(
-                    total_interest / 1_000_000
-                )
-            )
-
-        with c4:
-            st.metric(
-                "TỔNG NHẬN",
-                format_million(
-                    total_cash_received / 1_000_000
-                )
-            )
-
-        st.success(
-            f"""
-            💰 Khi khách hàng rút ngày
-            **{withdrawal_date.strftime('%d/%m/%Y')}**,
-
-            tổng số tiền nhận được là:
-
-            ### {format_money(total_cash_received)}
-
-            Trong đó:
-
-            **Tiền gốc:** {format_money(principal)}
-
-            **Tổng tiền lãi:** {format_money(total_interest)}
-            """
-        )
-
-
-# ============================================================
-# PHẦN HƯỚNG DẪN
-# ============================================================
-
-st.divider()
-
-with st.expander("📖 Hướng dẫn sử dụng"):
-
-    st.markdown("""
-    ### 1. Nhập số tiền gửi
-
-    Ví dụ:
-
-    `500` = 500 triệu đồng.
-
-    ### 2. Nhập lãi suất
-
-    Ví dụ:
-
-    - Lãi suất có kỳ hạn: `5%/năm`
-    - Lãi suất không kỳ hạn: `0.2%/năm`
-
-    ### 3. Chọn kỳ hạn
-
-    Có thể chọn:
-
-    - 1 tháng
-    - 2 tháng
-    - 3 tháng
-    - 6 tháng
-    - 9 tháng
-    - 12 tháng
-    - 18 tháng
-    - 24 tháng
-    - 36 tháng
-
-    ### 4. Chọn phương thức nhận lãi
-
-    **Nhận lãi trước:**
-
-    Khách hàng nhận tiền lãi ngay khi gửi.
-    Khi đáo hạn nhận lại tiền gốc.
-
-    **Nhận lãi hàng tháng:**
-
-    Tiền lãi được chia và trả theo từng tháng.
-
-    **Nhận lãi cuối kỳ:**
-
-    Đến ngày đáo hạn khách hàng nhận cả gốc và lãi.
-
-    ### 5. Rút trước hạn
-
-    Nếu:
-
-    `Ngày rút < Ngày đáo hạn`
-
-    thì toàn bộ thời gian gửi được tính theo
-    lãi suất không kỳ hạn.
-
-    ### 6. Tự động tái tục
-
-    Nếu:
-
-    `Ngày rút > Ngày đáo hạn`
-
-    hệ thống tự động chia khoản tiền gửi thành
-    nhiều kỳ bằng đúng kỳ hạn ban đầu.
-
-    Ví dụ:
-
-    Gửi:
-
-    `01/01/2026`
-
-    Kỳ hạn:
-
-    `3 tháng`
-
-    Nếu rút:
-
-    `15/10/2026`
-
-    hệ thống tính:
-
-    `01/01 → 01/04`
-
-    `01/04 → 01/07`
-
-    `01/07 → 01/10`
-
-    `01/10 → 15/10`
-    """)
-
-
-# ============================================================
-# THÔNG TIN CÔNG THỨC
-# ============================================================
-
-with st.expander("🧮 Công thức tính lãi"):
-
-    st.markdown(
-        """
-        ### Công thức lãi theo ngày
-
-        Lãi tiền gửi:
-
-        **Tiền lãi = Tiền gốc × Lãi suất năm × Số ngày / 365**
-
-        Trong đó:
-
-        - Tiền gốc: số tiền khách hàng gửi.
-        - Lãi suất: tính theo %/năm.
-        - Số ngày: số ngày thực tế gửi.
-        - Cơ sở tính: 365 ngày/năm.
-
-        ### Tổng tiền nhận
-
-        **Tổng tiền nhận = Tiền gốc + Tiền lãi**
-
-        Đối với rút trước hạn:
-
-        **Lãi suất áp dụng = Lãi suất không kỳ hạn**
-
-        Đối với tiền gửi đến hạn nhưng không rút:
-
-        **Tự động tái tục theo đúng kỳ hạn ban đầu.**
-        """
-    )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.divider()
-
+        def tinh_tong_nhan(pt):
+            if not ky_hoan_thanh and ky_le is not None:
+                _, _, so_ngay = ky_le
+                return so_tien_goc + so_tien_goc * i_khong_ky_han / 365 * so_ngay
+            if pt == PHUONG_THUC_OPTIONS[0]:
+                p = so_tien_goc
+                for (_, _, so_ngay) in ky_hoan_thanh:
+                    p += p * i_ky_han / 365 * so_ngay
+                if ky_le is not None:
+                    _, _, so_ngay = ky_le
+                    p += p * i_khong_ky_han / 365 * so_ngay
+                return p
+            else:
+                tong = so_tien_goc
+                for (_, _, so_ngay) in ky_hoan_thanh:
+                    tong += so_tien_goc * i_ky_han / 365 * so_ngay
+                if ky_le is not None:
+                    _, _, so_ngay = ky_le
+                    tong += so_tien_goc * i_khong_ky_han / 365 * so_ngay
+                return tong
+
+        cA, cB, cC = st.columns(3)
+        for col, pt in zip((cA, cB, cC), PHUONG_THUC_OPTIONS):
+            with col:
+                tong_pt = tinh_tong_nhan(pt)
+                is_current = "👉 " if pt == phuong_thuc else ""
+                st.metric(f"{is_current}{pt}", fmt_vnd(tong_pt))
+
+st.write("---")
 st.caption(
-    "🏦 Hệ thống mô phỏng tính tiền gửi tiết kiệm | "
-    "Streamlit | Cơ sở tính lãi 365 ngày/năm"
+    "⚠️ Đây là công cụ mô phỏng mang tính minh họa, dùng công thức lãi đơn/lãi kép theo ngày thực tế (365 ngày/năm). "
+    "Số liệu thực tế có thể khác tùy quy định và biểu lãi suất của từng ngân hàng."
 )
