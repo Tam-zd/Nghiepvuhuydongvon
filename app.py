@@ -611,17 +611,17 @@ def battle_tab(value_A, principal, interest_A, value_B, loan_cost, interest_B, t
 
     with colA:
         crown = '<div class="winner-crown">👑</div>' if a_wins else ""
-        st.markdown(
-            f"""
-            <div class="battle-card {'winner' if a_wins else ''}">
-                {crown}
-                <div class="bc-tag">PHƯƠNG ÁN A</div>
-                <div class="bc-title">🏃 Rút trước hạn ngay</div>
-                <div class="bc-value">{format_money(value_A)}</div>
-                <div class="bc-line">Gốc {format_money(principal)} + lãi không kỳ hạn {format_money(interest_A)}</div>
-                <div class="bc-line">Quy đổi giá trị tại ngày đáo hạn {maturity_date.strftime('%d/%m/%Y')}</div>
-            </div>
-            """, unsafe_allow_html=True
+        html_a = (
+            f'<div class="battle-card {"winner" if a_wins else ""}">'
+            f'{crown}'
+            f'<div class="bc-tag">PHƯƠNG ÁN A</div>'
+            f'<div class="bc-title">🏃 Rút trước hạn ngay</div>'
+            f'<div class="bc-value">{format_money(value_A)}</div>'
+            f'<div class="bc-line">Gốc {format_money(principal)} + lãi không kỳ hạn {format_money(interest_A)}</div>'
+            f'<div class="bc-line">Quy đổi giá trị tại ngày đáo hạn {maturity_date.strftime("%d/%m/%Y")}</div>'
+            f'</div>'
+        )
+        st.markdown(html_a, unsafe_allow_html=True
         )
     with colVS:
         st.markdown('<div style="height:60px;"></div><div class="battle-vs">VS</div>', unsafe_allow_html=True)
