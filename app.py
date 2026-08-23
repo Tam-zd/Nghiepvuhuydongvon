@@ -51,6 +51,19 @@ st.markdown(f"""
         font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, sans-serif !important;
     }}
 
+    /* Khôi phục font gốc cho icon Material Symbols của Streamlit.
+       Các icon (mũi tên expander, mũi tên selectbox, icon eye của password...) được vẽ
+       bằng ligature text (vd: "keyboard_arrow_right") thông qua font "Material Symbols".
+       Nếu bị ép sang Plus Jakarta Sans, ligature vỡ và hiện ra chữ thô thay vì icon. */
+    [data-testid="stIconMaterial"],
+    span[data-testid="stIconMaterial"],
+    .material-symbols-rounded,
+    .material-symbols-outlined,
+    .material-icons,
+    [class*="material-symbols"] {{
+        font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
+    }}
+
     .stApp {{
         background: linear-gradient(135deg, #F8FAFC 0%, #E2E8F0 100%);
     }}
@@ -433,8 +446,16 @@ def monthly_breakdown(principal, annual_rate_percent, start_date, end_date):
 
 
 def renewal_periods(principal, term_rate, non_term_rate, start_date, withdrawal_date, term_months):
+    """
+    Mỗi lần đáo hạn mà khách không rút, ngân hàng tự động tái tục CẢ GỐC LẪN LÃI
+    (gốc kỳ mới = gốc kỳ trước + tiền lãi vừa phát sinh). Vì vậy lãi của kỳ tái tục
+    phải được tính trên số dư mới này, không phải trên số tiền gửi ban đầu.
+    Ví dụ: gửi 500 triệu, kỳ hạn 3 tháng, đến hạn được +lãi ~6.x triệu -> gốc kỳ kế
+    tiếp là ~506 triệu, và lãi của kỳ đó (kể cả khi rút giữa kỳ) phải tính trên ~506 triệu.
+    """
     periods = []
     current_start = start_date
+    current_principal = principal  # số dư (gốc) đang sinh lãi ở đầu mỗi kỳ
 
     while current_start < withdrawal_date:
         maturity = current_start + relativedelta(months=term_months)
@@ -443,18 +464,22 @@ def renewal_periods(principal, term_rate, non_term_rate, start_date, withdrawal_
 
         applied_rate = term_rate if is_full_period else non_term_rate
         days = get_days(current_start, period_end)
-        interest = simple_interest(principal, applied_rate, days)
+        interest = simple_interest(current_principal, applied_rate, days)
 
         periods.append({
             "Kỳ": len(periods) + 1,
             "Ngày bắt đầu": current_start,
             "Ngày kết thúc": period_end,
             "Số ngày": days,
+            "Gốc đầu kỳ": current_principal,
             "Lãi suất áp dụng": applied_rate,
             "Tiền lãi": interest,
             "Đủ kỳ hạn": is_full_period
         })
         current_start = period_end
+        if is_full_period:
+            # Đáo hạn mà không rút -> gộp lãi vào gốc để tái tục kỳ tiếp theo
+            current_principal += interest
 
     return periods
 
@@ -1000,7 +1025,8 @@ with col_right:
 
             detail_df = pd.DataFrame([{
                 "Kỳ": p["Kỳ"], "Ngày bắt đầu": p["Ngày bắt đầu"], "Ngày kết thúc": p["Ngày kết thúc"],
-                "Số ngày": p["Số ngày"], "Lãi suất áp dụng (%/năm)": p["Lãi suất áp dụng"],
+                "Số ngày": p["Số ngày"], "Gốc đầu kỳ (VNĐ)": round(p["Gốc đầu kỳ"]),
+                "Lãi suất áp dụng (%/năm)": p["Lãi suất áp dụng"],
                 "Tiền lãi (VNĐ)": round(p["Tiền lãi"]),
                 "Trạng thái": "Đủ kỳ hạn (tái tục)" if p["Đủ kỳ hạn"] else "Rút giữa kỳ (không kỳ hạn)"
             } for p in periods])
@@ -1038,7 +1064,8 @@ with col_right:
 
             with tab2:
                 st.markdown("##### 📋 Lịch sử tái tục — dòng tiền chi tiết")
-                render_dataframe_bank_style(detail_df, currency_cols=["Tiền lãi (VNĐ)"],
+                st.caption("💡 Từ kỳ thứ 2 trở đi, **Gốc đầu kỳ** = gốc kỳ trước + lãi đã tái tục (lãi nhập gốc).")
+                render_dataframe_bank_style(detail_df, currency_cols=["Gốc đầu kỳ (VNĐ)", "Tiền lãi (VNĐ)"],
                                              date_cols=["Ngày bắt đầu", "Ngày kết thúc"],
                                              rate_cols=["Lãi suất áp dụng (%/năm)"])
 
