@@ -39,6 +39,49 @@ def format_million(value: float) -> str:
     return f"{value:,.2f} triệu đồng"
 
 
+def auto_label(v: float) -> str:
+    """Đổi số tiền VNĐ thành nhãn rút gọn kiểu Việt Nam: 50 triệu / 1.5 tỷ / 200 nghìn..."""
+    v = float(v)
+    if v >= 1_000_000_000:
+        return f"{v / 1_000_000_000:g} tỷ"
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:g} triệu"
+    if v >= 1_000:
+        return f"{v / 1_000:g} nghìn"
+    return f"{v:g} đồng"
+
+
+# Hiểu các cách gõ: "50000000", "50 triệu", "1.5 tỷ", "200k"...
+import re as _re
+
+_SUFFIX_MULT = {
+    "": 1, "d": 1, "dong": 1, "đ": 1, "đồng": 1,
+    "k": 1_000, "nghin": 1_000, "nghìn": 1_000,
+    "tr": 1_000_000, "trieu": 1_000_000, "triệu": 1_000_000, "m": 1_000_000,
+    "ty": 1_000_000_000, "tỷ": 1_000_000_000, "b": 1_000_000_000,
+}
+_PARSE_RE = _re.compile(r"^([\d]*\.?[\d]+)\s*([^\d\s]*)$", _re.UNICODE)
+
+
+def parse_smart_amount(text: str):
+    """'50 triệu' / '1.5 tỷ' / '200k' / '500000000' -> số VNĐ (float) hoặc None nếu không hiểu."""
+    if not text:
+        return None
+    t = text.strip().lower().replace(",", "").replace("vnđ", "").replace("vnd", "").strip()
+    m = _PARSE_RE.match(t)
+    if not m:
+        return None
+    num_str, suffix = m.groups()
+    suffix = suffix.strip()
+    if suffix not in _SUFFIX_MULT:
+        return None
+    try:
+        number = float(num_str)
+    except ValueError:
+        return None
+    return number * _SUFFIX_MULT[suffix]
+
+
 # ============================================================
 # HẰNG SỐ KỲ HẠN
 # ============================================================
@@ -180,28 +223,71 @@ with st.sidebar:
 
 st.subheader("1️⃣ Thông tin tiền gửi")
 
+# ---------------- Ô NHẬP TIỀN THÔNG MINH ----------------
+DEFAULT_AMOUNT = 500_000_000.0
+
+if "so_tien_goc" not in st.session_state:
+    st.session_state.so_tien_goc = DEFAULT_AMOUNT
+if "so_tien_text" not in st.session_state:
+    st.session_state.so_tien_text = f"{DEFAULT_AMOUNT:,.0f}"
+
+
+def _set_amount(new_val: float):
+    new_val = max(float(new_val), 0.0)
+    st.session_state.so_tien_goc = new_val
+    st.session_state.so_tien_text = f"{new_val:,.0f}"
+
+
+def _on_change_amount_text():
+    val = parse_smart_amount(st.session_state.so_tien_text)
+    if val is not None:
+        _set_amount(val)
+    else:
+        # Gõ không hợp lệ -> quay về giá trị hợp lệ gần nhất, tránh vỡ tính toán
+        st.session_state.so_tien_text = f"{st.session_state.so_tien_goc:,.0f}"
+
+
+st.markdown("**💰 Số tiền khách hàng gửi**")
+c_input, c_reset = st.columns([4, 1])
+with c_input:
+    st.text_input(
+        "Nhập số tiền (vd: 500000000, 50 triệu, 1.5 tỷ, 200k...)",
+        key="so_tien_text",
+        on_change=_on_change_amount_text,
+        label_visibility="collapsed",
+    )
+with c_reset:
+    st.button("↺ Đặt lại", on_click=_set_amount, args=(DEFAULT_AMOUNT,), use_container_width=True)
+
+st.caption(
+    f"➡️ Số tiền đang chọn: **{format_money(st.session_state.so_tien_goc)}** "
+    f"(≈ {auto_label(st.session_state.so_tien_goc)})"
+)
+
+QUICK_AMOUNTS = [50_000_000, 100_000_000, 200_000_000, 500_000_000, 1_000_000_000, 2_000_000_000]
+st.caption("Chọn nhanh:")
+quick_cols = st.columns(len(QUICK_AMOUNTS))
+for i, amt in enumerate(QUICK_AMOUNTS):
+    if quick_cols[i].button(auto_label(amt), use_container_width=True, key=f"quick_{amt}"):
+        _set_amount(amt)
+        st.rerun()
+
+st.caption("⚡ Điều chỉnh nhanh:")
+adj_cols = st.columns(6)
+for col, nhan, delta in zip(
+    adj_cols,
+    ["➕1tr", "➕10tr", "➕50tr", "➖1tr", "➖10tr", "➖50tr"],
+    [1_000_000, 10_000_000, 50_000_000, -1_000_000, -10_000_000, -50_000_000]
+):
+    if col.button(nhan, key=f"delta_{delta}", use_container_width=True):
+        _set_amount(st.session_state.so_tien_goc + delta)
+        st.rerun()
+
+st.divider()
+
 col1, col2, col3 = st.columns(3)
 
-QUICK_AMOUNTS = [50, 100, 200, 500, 1000, 2000]  # triệu đồng
-
-if "principal_million" not in st.session_state:
-    st.session_state.principal_million = 500.0
-
 with col1:
-    principal_million = st.number_input(
-        "💰 Số tiền khách hàng gửi (triệu đồng)",
-        min_value=0.01, step=10.0, format="%.2f",
-        key="principal_million"
-    )
-
-    st.caption("Chọn nhanh:")
-    quick_cols = st.columns(len(QUICK_AMOUNTS))
-    for i, amt in enumerate(QUICK_AMOUNTS):
-        label = f"{amt} tr" if amt < 1000 else f"{amt // 1000} tỷ"
-        if quick_cols[i].button(label, use_container_width=True, key=f"quick_{amt}"):
-            st.session_state.principal_million = float(amt)
-            st.rerun()
-
     term_text = st.selectbox("📅 Kỳ hạn gửi tiền", list(TERM_OPTIONS.keys()), index=3)
     term_months = TERM_OPTIONS[term_text]
 
@@ -258,15 +344,15 @@ calculate_button = st.button("🧮 TÍNH TOÁN", type="primary", use_container_w
 
 if calculate_button:
 
-    if principal_million <= 0:
+    principal = st.session_state.so_tien_goc
+
+    if principal <= 0:
         st.error("Số tiền gửi phải lớn hơn 0.")
         st.stop()
 
     if withdrawal_date <= start_date:
         st.error("Ngày rút tiền phải lớn hơn ngày gửi tiền.")
         st.stop()
-
-    principal = principal_million * 1_000_000
 
     # --------------------------------------------------------
     # KHÔNG KỲ HẠN
@@ -534,7 +620,9 @@ st.divider()
 
 with st.expander("📖 Hướng dẫn sử dụng"):
     st.markdown("""
-    **1. Số tiền gửi** — nhập theo triệu đồng, ví dụ `500` = 500.000.000 VNĐ.
+    **1. Số tiền gửi** — gõ tự do rồi nhấn Enter, hệ thống tự hiểu:
+    `500000000`, `50 triệu`, `1.5 tỷ`, `200k`... Hoặc dùng nút chọn nhanh /
+    nút ➕➖ để điều chỉnh.
 
     **2. Lãi suất** — nhập lãi suất có kỳ hạn và không kỳ hạn (%/năm).
 
